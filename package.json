@@ -1,0 +1,12 @@
+{
+  "name": "wifi-triangulation",
+  "version": "1.0.0",
+  "description": "Wi-Fi RSSI/RTT triangulation engine with GPS anchor and live map",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "ws": "^8.19.0"
+  }
+}
