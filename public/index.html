@@ -165,6 +165,10 @@
         }
         .place-btn:hover { background: #374151; color: #fff; }
         .ap-card.placed .place-btn { background: #3b82f622; border-color: #3b82f6; color: #60a5fa; }
+        .ap-card.calibrated { border-color: #22c55e; }
+        .ap-card.calibrated:hover { border-color: #22c55e; background: #0d1a11; }
+        .cal-btn { background: #22c55e22 !important; border-color: #22c55e !important; color: #22c55e !important; }
+        .cal-btn:hover { background: #22c55e44 !important; color: #fff !important; }
 
         .ap-meta { font-size: 0.65rem; color: #4b5563; display: flex; gap: 10px; margin-bottom: 6px; }
         .signal-bar-bg { height: 3px; background: #1e2433; border-radius: 2px; overflow: hidden; }
@@ -240,6 +244,7 @@
             </nav>
         </div>
         <div class="header-right">
+            <button id="cal-toggle" style="padding:5px 12px;font-size:0.68rem;font-weight:600;background:transparent;color:#6b7280;border:1px solid #1e2433;border-radius:8px;cursor:pointer;transition:all 0.2s;">Calibrate</button>
             <div class="mode-toggle">
                 <button id="mode-rssi" class="active">RSSI</button>
                 <button id="mode-hybrid">Hybrid</button>
@@ -372,6 +377,10 @@
                     <div style="color:#3b82f6;font-weight:700;font-size:0.8rem;">Set GPS Anchor</div>
                     <div class="hud-sub">Use current browser location as origin (0,0)</div>
                 </div>
+                <div class="hud-card" style="cursor:pointer;text-align:center;display:none;" id="clear-cal-btn">
+                    <div style="color:#ef4444;font-weight:700;font-size:0.8rem;">Clear Calibrations</div>
+                    <div class="hud-sub" id="cal-count-hud">0 APs calibrated</div>
+                </div>
             </div>
 
             <div class="canvas-instructions" id="instructions">
@@ -381,6 +390,7 @@
             <div class="canvas-legend">
                 <div><span class="swatch" style="background:#3b82f6;"></span> AP (RSSI ring)</div>
                 <div><span class="swatch" style="background:#22c55e;"></span> AP (RTT ring)</div>
+                <div><span class="swatch" style="background:#22c55e;border:1px solid #fff;"></span> GPS Calibrated AP</div>
                 <div><span class="swatch" style="background:#f59e0b;"></span> Intersection</div>
                 <div><span class="swatch" style="background:#ef4444;"></span> Est. position</div>
             </div>
@@ -415,6 +425,9 @@
         gpsAnchor: null,        // { lat, lng, accuracy, timestamp }
         browserGPS: null,       // latest browser GPS reading
         gpsWatchId: null,
+        // GPS calibration: walk to each router and save GPS coords
+        calibratedAPs: {},      // ssid -> { lat, lng, accuracy, timestamp }
+        calibrationAnchor: null, // { lat, lng } centroid of calibrated APs
     };
 
     // ── DOM ──
@@ -430,7 +443,11 @@
 
     txPowerEl.addEventListener('input', () => { txPowerValEl.textContent = txPowerEl.value + ' dBm'; recalculate(); });
     pathLossEl.addEventListener('input', () => { pathLossValEl.textContent = (parseInt(pathLossEl.value) / 10).toFixed(1); recalculate(); });
-    gridScaleEl.addEventListener('input', () => { gridScaleValEl.textContent = gridScaleEl.value + ' m'; recalculate(); });
+    gridScaleEl.addEventListener('input', () => {
+        gridScaleValEl.textContent = gridScaleEl.value + ' m';
+        if (Object.keys(state.calibratedAPs).length > 0) applyCalibrations();
+        else recalculate();
+    });
 
     // Mode toggle
     document.querySelectorAll('.mode-toggle button').forEach(btn => {
@@ -441,6 +458,16 @@
             $('hud-method').textContent = { rssi: 'RSSI Only', hybrid: 'RSSI + RTT', rtt: 'RTT Sim' }[state.mode];
             recalculate();
         });
+    });
+
+    // Calibration mode toggle
+    $('cal-toggle').addEventListener('click', () => {
+        state.calibrationMode = !state.calibrationMode;
+        const btn = $('cal-toggle');
+        btn.style.background = state.calibrationMode ? '#22c55e' : 'transparent';
+        btn.style.color = state.calibrationMode ? '#fff' : '#6b7280';
+        btn.style.borderColor = state.calibrationMode ? '#22c55e' : '#1e2433';
+        renderAPList();
     });
 
     // ══════════════════════════════════════════════════════════════
@@ -733,22 +760,76 @@
         const list = $('ap-list');
         list.innerHTML = '';
 
-        for (const net of state.networks) {
+        // Sort by RSSI (strongest first) in calibration mode
+        let nets = [...state.networks];
+        if (state.calibrationMode) {
+            nets.sort((a, b) => b.rssi - a.rssi);
+        }
+
+        // Find strongest AP for "NEAREST" badge
+        const strongestSSID = nets.length > 0 ? nets.reduce((a, b) => a.rssi > b.rssi ? a : b).ssid : null;
+
+        // Calibration progress counter
+        if (state.calibrationMode) {
+            const count = Object.keys(state.calibratedAPs).length;
+            const statusDiv = document.createElement('div');
+            statusDiv.style.cssText = 'padding:8px 12px;margin-bottom:6px;border-radius:8px;font-size:0.7rem;text-align:center;' +
+                (count >= 3
+                    ? 'background:#22c55e15;border:1px solid #22c55e33;color:#22c55e;'
+                    : 'background:#3b82f615;border:1px solid #3b82f633;color:#60a5fa;');
+            statusDiv.textContent = count >= 3
+                ? `${count} APs calibrated \u2014 position active!`
+                : `${count}/3 APs calibrated \u2014 need ${3 - count} more`;
+            if (state.browserGPS) {
+                const accDiv = document.createElement('div');
+                accDiv.style.cssText = 'font-size:0.6rem;color:#6b7280;margin-top:4px;';
+                accDiv.textContent = `GPS accuracy: \u00B1${state.browserGPS.accuracy.toFixed(1)}m`;
+                statusDiv.appendChild(accDiv);
+            }
+            list.appendChild(statusDiv);
+        }
+
+        for (const net of nets) {
             const dist = rssiToDistance(net.rssi, net);
             const uncertainty = distanceUncertainty(net.rssi, net);
             const pct = signalPercent(net.rssi);
             const isPlaced = net.ssid in state.apPositions;
             const isSelected = state.selectedAP === net.ssid;
+            const isCalibrated = net.ssid in state.calibratedAPs;
+            const isStrongest = state.calibrationMode && net.ssid === strongestSSID;
 
             const card = document.createElement('div');
-            card.className = 'ap-card' + (isPlaced ? ' placed' : '') + (isSelected ? ' selected' : '');
+            card.className = 'ap-card'
+                + (isCalibrated ? ' calibrated' : isPlaced ? ' placed' : '')
+                + (isSelected ? ' selected' : '');
+
+            // Action button depends on mode
+            let actionBtn;
+            if (state.calibrationMode) {
+                if (isCalibrated) {
+                    const cal = state.calibratedAPs[net.ssid];
+                    actionBtn = `<span style="color:#22c55e;font-size:0.58rem;">&#10003; ${cal.lat.toFixed(6)}, ${cal.lng.toFixed(6)}</span>`;
+                } else {
+                    actionBtn = `<button class="place-btn cal-btn">Calibrate</button>`;
+                }
+            } else {
+                actionBtn = `<button class="place-btn">${isCalibrated ? 'Calibrated' : isPlaced ? 'Move' : 'Place'}</button>`;
+            }
+
+            // "NEAREST" badge for strongest uncalibrated AP
+            const nearestBadge = isStrongest && !isCalibrated
+                ? '<span style="font-size:0.55rem;padding:1px 5px;border-radius:4px;background:#f59e0b22;color:#f59e0b;border:1px solid #f59e0b33;margin-left:4px;">NEAREST</span>'
+                : '';
+
             card.innerHTML = `
                 <div class="ap-top">
                     <div class="ap-name">
+                        ${isCalibrated ? '<span style="color:#22c55e;">&#9679;</span> ' : ''}
                         ${esc(net.ssid)}
                         <span class="band-tag ${bandClass(net.band)}">${net.band || '?'}</span>
+                        ${nearestBadge}
                     </div>
-                    <button class="place-btn">${isPlaced ? 'Move' : 'Place'}</button>
+                    ${actionBtn}
                 </div>
                 <div class="ap-meta">
                     <span>Ch ${net.channel}</span>
@@ -758,20 +839,42 @@
                 </div>
                 <div class="signal-bar-bg"><div class="signal-bar" style="width:${pct}%;background:${signalColor(net.rssi)};"></div></div>
                 <div class="ap-bottom">
-                    <span class="dist">Est: <strong>${dist.toFixed(2)}m</strong> ±${uncertainty.toFixed(1)}m</span>
-                    <span>${isPlaced ? 'On map' : 'Click to place'}</span>
+                    <span class="dist">Est: <strong>${dist.toFixed(2)}m</strong> \u00B1${uncertainty.toFixed(1)}m</span>
+                    <span>${isCalibrated ? 'GPS calibrated' : isPlaced ? 'On map' : 'Click to place'}</span>
                 </div>
             `;
 
-            const selectAP = () => {
-                state.selectedAP = net.ssid;
-                state.placingMode = true;
-                renderAPList();
-                $('instructions').textContent = `Click the map to place "${net.ssid}"`;
-                $('instructions').style.opacity = '1';
-            };
-            card.addEventListener('click', selectAP);
-            card.querySelector('.place-btn').addEventListener('click', (e) => { e.stopPropagation(); selectAP(); });
+            if (state.calibrationMode) {
+                const calBtn = card.querySelector('.cal-btn');
+                if (calBtn) {
+                    calBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        calibrateAP(net.ssid);
+                    });
+                }
+                // Re-calibrate on card click for already-calibrated APs
+                if (isCalibrated) {
+                    card.style.cursor = 'pointer';
+                    card.addEventListener('click', () => {
+                        if (confirm(`Re-calibrate ${net.ssid} with current GPS?`)) {
+                            calibrateAP(net.ssid);
+                        }
+                    });
+                }
+            } else {
+                // Original placement behavior
+                const selectAP = () => {
+                    if (isCalibrated) return; // Don't allow manual placement of calibrated APs
+                    state.selectedAP = net.ssid;
+                    state.placingMode = true;
+                    renderAPList();
+                    $('instructions').textContent = `Click the map to place "${net.ssid}"`;
+                    $('instructions').style.opacity = '1';
+                };
+                card.addEventListener('click', selectAP);
+                const placeBtn = card.querySelector('.place-btn');
+                if (placeBtn) placeBtn.addEventListener('click', (e) => { e.stopPropagation(); selectAP(); });
+            }
 
             list.appendChild(card);
         }
@@ -965,21 +1068,30 @@
                 ctx.fill();
             }
 
-            // AP dot
-            const apColor = state.mode === 'rtt' ? '#22c55e' : '#3b82f6';
+            // AP dot — green for calibrated, blue for manual, green for RTT mode
+            const isCal = ssid in state.calibratedAPs;
+            const apColor = isCal ? '#22c55e' : (state.mode === 'rtt' ? '#22c55e' : '#3b82f6');
             ctx.fillStyle = apColor;
             ctx.beginPath(); ctx.arc(sx, sy, 7, 0, Math.PI * 2); ctx.fill();
             ctx.fillStyle = '#fff';
             ctx.beginPath(); ctx.arc(sx, sy, 3, 0, Math.PI * 2); ctx.fill();
 
             // Labels
-            ctx.fillStyle = '#9ca3af';
+            ctx.fillStyle = isCal ? '#22c55e' : '#9ca3af';
             ctx.font = '11px -apple-system, sans-serif';
             ctx.textAlign = 'center';
-            ctx.fillText(ssid.length > 18 ? ssid.slice(0, 17) + '…' : ssid, sx, sy - 14);
+            ctx.fillText(ssid.length > 18 ? ssid.slice(0, 17) + '\u2026' : ssid, sx, sy - 14);
             ctx.fillStyle = '#4b5563';
             ctx.font = '9px monospace';
-            ctx.fillText(`${net.rssi}dBm · ${rssiDist.toFixed(1)}m`, sx, sy + 22);
+            ctx.fillText(`${net.rssi}dBm \u00B7 ${rssiDist.toFixed(1)}m`, sx, sy + 22);
+
+            // Show GPS coords for calibrated APs
+            if (isCal) {
+                const cal = state.calibratedAPs[ssid];
+                ctx.fillStyle = '#22c55e66';
+                ctx.font = '8px monospace';
+                ctx.fillText(`GPS: ${cal.lat.toFixed(6)}, ${cal.lng.toFixed(6)}`, sx, sy + 34);
+            }
             ctx.textAlign = 'left';
         }
 
@@ -1202,6 +1314,15 @@
     // ── Canvas Interaction ──
     canvas.addEventListener('click', (e) => {
         if (!state.placingMode || !state.selectedAP) return;
+        // Don't allow manual placement of calibrated APs
+        if (state.selectedAP in state.calibratedAPs) {
+            $('instructions').textContent = `"${state.selectedAP}" is GPS-calibrated \u2014 clear calibration to place manually`;
+            $('instructions').style.opacity = '1';
+            setTimeout(() => { $('instructions').style.opacity = '0'; }, 3000);
+            state.placingMode = false;
+            state.selectedAP = null;
+            return;
+        }
         const rect = canvas.getBoundingClientRect();
         const [gx, gy] = toGrid(e.clientX - rect.left, e.clientY - rect.top);
         state.apPositions[state.selectedAP] = { x: gx, y: gy };
@@ -1269,7 +1390,12 @@
             $('status').querySelector('.dot').style.background = '#22c55e';
 
             updateLocationBanner();
-            recalculate();
+            // Re-apply calibrations now that we have network data
+            if (Object.keys(state.calibratedAPs).length > 0) {
+                applyCalibrations();
+            } else {
+                recalculate();
+            }
             return true;
         } catch (e) {
             return false;
@@ -1300,7 +1426,11 @@
                     updateRTTDisplay();
                 }
                 updateLocationBanner();
-                recalculate();
+                if (Object.keys(state.calibratedAPs).length > 0) {
+                    applyCalibrations();
+                } else {
+                    recalculate();
+                }
             } catch (err) { console.error('Parse error:', err); }
         };
         ws.onclose = () => {
@@ -1346,6 +1476,98 @@
             lat: anchor.lat + dLat,
             lng: anchor.lng + dLng,
         };
+    }
+
+    // Convert GPS coords to grid coordinates relative to an anchor (inverse of offsetToGPS)
+    function gpsToGrid(anchor, lat, lng) {
+        const scale = getGridScale();
+        const dLat = lat - anchor.lat;
+        const dLng = lng - anchor.lng;
+        const dy = -dLat * METERS_PER_DEG_LAT / scale;
+        const dx = dLng * metersPerDegLng(anchor.lat) / scale;
+        return { x: dx, y: dy };
+    }
+
+    // Compute weighted centroid of all calibrated AP positions
+    function computeCalibrationAnchor() {
+        const entries = Object.values(state.calibratedAPs);
+        if (entries.length === 0) return null;
+        let sumLat = 0, sumLng = 0, totalW = 0;
+        for (const cal of entries) {
+            const w = 1 / Math.max(1, cal.accuracy);
+            sumLat += cal.lat * w;
+            sumLng += cal.lng * w;
+            totalW += w;
+        }
+        return { lat: sumLat / totalW, lng: sumLng / totalW };
+    }
+
+    // Apply all calibrations: set anchor, convert GPS→grid, recalculate
+    function applyCalibrations() {
+        const entries = Object.entries(state.calibratedAPs);
+        if (entries.length === 0) return;
+
+        const anchor = computeCalibrationAnchor();
+        if (!anchor) return;
+
+        // Set GPS anchor to centroid of calibrated APs
+        state.gpsAnchor = {
+            lat: anchor.lat, lng: anchor.lng,
+            accuracy: Math.min(...Object.values(state.calibratedAPs).map(c => c.accuracy)),
+            timestamp: Date.now(),
+        };
+        state.calibrationAnchor = anchor;
+
+        // Convert each calibrated AP's GPS to grid coordinates
+        for (const [ssid, cal] of entries) {
+            const grid = gpsToGrid(anchor, cal.lat, cal.lng);
+            state.apPositions[ssid] = { x: grid.x, y: grid.y };
+        }
+
+        // Update HUD
+        $('hud-anchor').textContent = formatGPS(anchor.lat, anchor.lng);
+        $('hud-anchor-acc').textContent =
+            `Calibration anchor (centroid of ${entries.length} APs) \u2014 auto-computed`;
+
+        // Update clear button visibility
+        $('clear-cal-btn').style.display = 'block';
+        $('cal-count-hud').textContent = `${entries.length} APs calibrated`;
+
+        saveCalibrations();
+        recalculate();
+    }
+
+    // Calibrate an AP: save current browser GPS as the AP's real-world position
+    function calibrateAP(ssid) {
+        if (!state.browserGPS) {
+            $('instructions').textContent = 'Waiting for GPS fix\u2026 move to an open area';
+            $('instructions').style.opacity = '1';
+            setTimeout(() => { $('instructions').style.opacity = '0'; }, 3000);
+            return;
+        }
+        state.calibratedAPs[ssid] = {
+            lat: state.browserGPS.lat,
+            lng: state.browserGPS.lng,
+            accuracy: state.browserGPS.accuracy,
+            timestamp: Date.now(),
+        };
+        applyCalibrations();
+    }
+
+    function saveCalibrations() {
+        try { localStorage.setItem('calibratedAPs', JSON.stringify(state.calibratedAPs)); } catch(e) {}
+    }
+
+    function loadCalibrations() {
+        try {
+            const raw = localStorage.getItem('calibratedAPs');
+            if (!raw) return;
+            const parsed = JSON.parse(raw);
+            if (typeof parsed === 'object' && parsed !== null && Object.keys(parsed).length > 0) {
+                state.calibratedAPs = parsed;
+                applyCalibrations();
+            }
+        } catch(e) {}
     }
 
     function formatGPS(lat, lng, precision = 10) {
@@ -1460,6 +1682,19 @@
     // Anchor button
     $('anchor-btn').addEventListener('click', setGPSAnchor);
 
+    // Clear calibrations button
+    $('clear-cal-btn').addEventListener('click', () => {
+        if (!confirm('Clear all GPS calibrations?')) return;
+        for (const ssid of Object.keys(state.calibratedAPs)) {
+            delete state.apPositions[ssid];
+        }
+        state.calibratedAPs = {};
+        state.calibrationAnchor = null;
+        localStorage.removeItem('calibratedAPs');
+        $('clear-cal-btn').style.display = 'none';
+        recalculate();
+    });
+
     // ── Check URL params for pre-set GPS anchor ──
     function checkURLAnchor() {
         const params = new URLSearchParams(window.location.search);
@@ -1483,6 +1718,7 @@
     connect();
     startBrowserGPS();
     checkURLAnchor();
+    loadCalibrations();
 })();
 </script>
 </body>
